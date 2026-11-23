@@ -1,19 +1,5 @@
-/**
- * Chat transport layer.
- *
- * The UI only talks to this interface. Today it is backed by a mock that simulates
- * other people typing and replying. To connect the professor's Socket.IO backend,
- * implement the same interface with socket.io-client, e.g.:
- *
- *   const socket = io(import.meta.env.VITE_SOCKET_URL);
- *   joinRoom:     (roomId)  => socket.emit("joinRoom", roomId)
- *   sendMessage:  (msg)     => socket.emit("chatMessage", msg)
- *   setTyping:    (r, on)   => socket.emit(on ? "typing" : "stopTyping", r)
- *   subscribe:    (handler) => { socket.on("message", m => handler({ type: "message", message: m })); ... }
- *
- * and export it as `chatService` instead of `createMockChatService()`.
- */
-import { REPLY_POOL, USERS, CURRENT_USER_ID } from "@/data/mock";
+
+import { io } from "socket.io-client";
 import type { Message } from "@/types/chat";
 
 export type ChatEvent =
@@ -29,68 +15,45 @@ export interface ChatService {
 }
 
 let idCounter = 0;
+
 export function newId(prefix = "m"): string {
-  idCounter += 1;
+  idCounter++;
   return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
 }
 
-function pick<T>(arr: T[]): T | undefined {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+// Connect to backend Socket.IO server
+const socket = io("http://localhost:8080");
 
-function contextualReply(text: string): string {
-  const t = text.toLowerCase();
-  if (/\b(hi|hey|hello|yo|sup)\b/.test(t)) return pick(["Hey Kapil! 👋", "Yo! What's up?", "Heyy, welcome back"]) ?? "Hey!";
-  if (t.includes("?")) return pick(["Good question 🤔 I think yes?", "Not sure, but I'd love to find out", "Honestly depends — what do you think?"]) ?? "Hmm";
-  if (/(thanks|thank you|ty)\b/.test(t)) return "Anytime 🙌";
-  return pick(REPLY_POOL) ?? "Nice!";
-}
+socket.on("connect", () => {
+  console.log("Connected to VibeRooms backend:", socket.id);
+});
 
-export function createMockChatService(): ChatService {
-  const handlers = new Set<(event: ChatEvent) => void>();
-  const emit = (e: ChatEvent) => handlers.forEach((h) => h(e));
+socket.on("connect_error", (error) => {
+  console.error("Backend connection error:", error.message);
+});
 
-  return {
-    joinRoom() {
-      /* no-op in mock mode */
-    },
-    setTyping() {
-      /* the mock server ignores our own typing state */
-    },
-    sendMessage(message, roomMemberIds) {
-      const candidates = roomMemberIds.filter((id) => {
-        if (id === CURRENT_USER_ID) return false;
-        const u = USERS.find((x) => x.id === id);
-        return u && u.status !== "offline";
-      });
-      const responderId = pick(candidates);
-      if (!responderId) return;
+export const chatService: ChatService = {
+  joinRoom(_roomId) {
+    // Current backend does not support room joining yet
+  },
 
-      const startDelay = 500 + Math.random() * 700;
-      const typingDuration = 1400 + Math.random() * 1400;
-      setTimeout(() => {
-        emit({ type: "typing", roomId: message.roomId, userId: responderId });
-        setTimeout(() => {
-          emit({ type: "stop-typing", roomId: message.roomId, userId: responderId });
-          emit({
-            type: "message",
-            message: {
-              id: newId(),
-              roomId: message.roomId,
-              userId: responderId,
-              text: contextualReply(message.text),
-              createdAt: Date.now(),
-              reactions: {},
-            },
-          });
-        }, typingDuration);
-      }, startDelay);
-    },
-    subscribe(handler) {
-      handlers.add(handler);
-      return () => handlers.delete(handler);
-    },
-  };
-}
+  sendMessage(message, _roomMemberIds) {
+    socket.emit("chatMessage", message);
+  },
 
-export const chatService: ChatService = createMockChatService();
+  setTyping(_roomId, _isTyping) {
+    // Typing events are not supported by the current backend
+  },
+
+  subscribe(handler) {
+    const onMessage = (message: Message) => {
+      handler({ type: "message", message });
+    };
+
+    socket.on("message", onMessage);
+
+    return () => {
+      socket.off("message", onMessage);
+    };
+  },
+};

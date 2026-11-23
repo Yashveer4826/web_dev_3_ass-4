@@ -1,6 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  BACKGROUND_POOL,
   CURRENT_USER_ID,
   FRIENDS,
   INITIAL_JOINED_ROOM_IDS,
@@ -12,6 +11,19 @@ import {
 import { chatService, newId } from "@/services/chat-service";
 import { slugify } from "@/lib/chat-utils";
 import type { Friend, Message, Room, RoomCategory, RoomIconKey, Tone, User, UserStatus } from "@/types/chat";
+
+const STORAGE_KEY = "viberooms-chat-data";
+
+function loadSavedData() {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved ? JSON.parse(saved) : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface CreateRoomInput {
   name: string;
@@ -65,16 +77,37 @@ interface ChatStore {
 const ChatContext = createContext<ChatStore | null>(null);
 
 export function ChatProvider({ children }: { children: ReactNode }) {
-  const [users, setUsers] = useState<Record<string, User>>(() =>
-    Object.fromEntries(USERS.map((u) => [u.id, u])),
-  );
-  const [rooms, setRooms] = useState<Room[]>(ROOMS);
-  const [joinedIds, setJoinedIds] = useState<string[]>(INITIAL_JOINED_ROOM_IDS);
-  const [messages, setMessages] = useState<Record<string, Message[]>>(INITIAL_MESSAGES);
-  const [unread, setUnread] = useState<Record<string, number>>(INITIAL_UNREAD);
-  const [typing, setTyping] = useState<Record<string, string[]>>({});
-  const [friends, setFriends] = useState<Friend[]>(FRIENDS);
-  const [mutedIds, setMutedIds] = useState<string[]>([]);
+  const [users, setUsers] = useState<Record<string, User>>(() => {
+  const saved = loadSavedData();
+  return saved?.users ?? Object.fromEntries(USERS.map((u) => [u.id, u]));
+});
+
+const [rooms, setRooms] = useState<Room[]>(() => {
+  return loadSavedData()?.rooms ?? ROOMS;
+});
+
+const [joinedIds, setJoinedIds] = useState<string[]>(() => {
+  return loadSavedData()?.joinedIds ?? INITIAL_JOINED_ROOM_IDS;
+});
+
+const [messages, setMessages] = useState<Record<string, Message[]>>(() => {
+  return loadSavedData()?.messages ?? INITIAL_MESSAGES;
+});
+
+const [unread, setUnread] = useState<Record<string, number>>(() => {
+  return loadSavedData()?.unread ?? INITIAL_UNREAD;
+});
+
+const [typing, setTyping] = useState<Record<string, string[]>>({});
+
+const [friends, setFriends] = useState<Friend[]>(() => {
+  return loadSavedData()?.friends ?? FRIENDS;
+});
+
+const [mutedIds, setMutedIds] = useState<string[]>(() => {
+  return loadSavedData()?.mutedIds ?? [];
+});
+
   const [signedOut, setSignedOut] = useState(false);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -89,46 +122,70 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const roomsRef = useRef(rooms);
   roomsRef.current = rooms;
 
+
+useEffect(() => {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      users,
+      rooms,
+      joinedIds,
+      messages,
+      unread,
+      friends,
+      mutedIds,
+    })
+  );
+}, [users, rooms, joinedIds, messages, unread, friends, mutedIds]);
+
+
   const appendMessage = useCallback((msg: Message) => {
-    setMessages((prev) => ({ ...prev, [msg.roomId]: [...(prev[msg.roomId] ?? []), msg] }));
+    setMessages((prev) => ({
+      ...prev,
+      [msg.roomId]: [...(prev[msg.roomId] ?? []), msg],
+    }));
   }, []);
 
-  // Live events from the transport (mock now, Socket.IO later).
+  // Live events from the Socket.IO server
   useEffect(() => {
     return chatService.subscribe((event) => {
       if (event.type === "message") {
+
+        
+        // Ignore our own message echoed back by the server
+        
+
         appendMessage(event.message);
+
         if (event.message.roomId !== activeRoomRef.current) {
-          setUnread((u) => ({ ...u, [event.message.roomId]: (u[event.message.roomId] ?? 0) + 1 }));
+          setUnread((u) => ({
+            ...u,
+            [event.message.roomId]:
+              (u[event.message.roomId] ?? 0) + 1,
+          }));
         }
       } else if (event.type === "typing") {
         setTyping((t) => {
           const list = t[event.roomId] ?? [];
-          return list.includes(event.userId) ? t : { ...t, [event.roomId]: [...list, event.userId] };
+          return list.includes(event.userId)
+            ? t
+            : { ...t, [event.roomId]: [...list, event.userId] };
         });
       } else {
-        setTyping((t) => ({ ...t, [event.roomId]: (t[event.roomId] ?? []).filter((id) => id !== event.userId) }));
+        setTyping((t) => ({
+          ...t,
+          [event.roomId]: (t[event.roomId] ?? []).filter(
+            (id) => id !== event.userId
+          ),
+        }));
       }
     });
   }, [appendMessage]);
 
-  // Ambient activity: occasionally someone posts in a room you're not looking at.
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const candidates = joinedRef.current.filter((id) => id !== activeRoomRef.current);
-      const roomId = candidates[Math.floor(Math.random() * candidates.length)];
-      const room = roomsRef.current.find((r) => r.id === roomId);
-      if (!room) return;
-      const others = room.memberIds.filter((id) => id !== CURRENT_USER_ID);
-      const userId = others[Math.floor(Math.random() * others.length)];
-      const text = BACKGROUND_POOL[Math.floor(Math.random() * BACKGROUND_POOL.length)];
-      if (!userId || !text) return;
-      appendMessage({ id: newId(), roomId: room.id, userId, text, createdAt: Date.now(), reactions: {} });
-      setUnread((u) => ({ ...u, [room.id]: (u[room.id] ?? 0) + 1 }));
-    }, 28_000);
-    return () => clearInterval(interval);
-  }, [appendMessage]);
 
+  // Ambient activity: occasionally someone posts in a room you're not looking at.
+  
+    
   const setActiveRoom = useCallback((roomId: string | null) => {
     activeRoomRef.current = roomId;
     if (roomId) {
